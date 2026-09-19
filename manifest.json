@@ -1,0 +1,36 @@
+{
+  "id": "termigo-security-kit",
+  "name": "Termigo Security Kit",
+  "version": "0.1.0",
+  "description": "Static security, dependency audit, and malware scanning tools for Termigo.",
+  "author": "99apps-id",
+  "categories": ["security", "sast", "dependency-audit", "av-scanner"],
+  "settings": {
+    "security.workingDir": {
+      "type": "string",
+      "title": "Report Directory",
+      "description": "Directory for storing security scan reports (relative to shell cwd or absolute).",
+      "default": "security-reports"
+    },
+    "security.shellTimeoutSecs": {
+      "type": "number",
+      "title": "Shell Timeout (seconds)",
+      "description": "Default timeout for shell commands run by security tools.",
+      "default": 300
+    }
+  },
+  "permissions": {
+    "shell_run_command": {
+      "reason": "Required to invoke SAST, dependency audit, and AV scanner binaries."
+    },
+    "fs_write_file": {
+      "reason": "Used as a fallback to persist scan reports."
+    },
+    "storage_get": {
+      "reason": "Read stored settings and scope."
+    },
+    "storage_set": {
+      "reason": "Persist scan scope and settings."
+    }
+  }
+}
