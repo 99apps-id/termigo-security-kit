@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "description": "Static security, dependency audit, and malware scanning tools for Termigo.",
   "author": "99apps-id",
+  "main": "dist/main.js",
+  "sandbox": "worker",
   "categories": ["security", "sast", "dependency-audit", "av-scanner"],
   "settings": {
     "security.workingDir": {

@@ -339,6 +339,43 @@ function makeDependencyAuditHandler(ctx) {
 
 // src/tools/avscan.js
 var MAX_EVIDENCE3 = 2e4;
+var BUNDLED_ADWARE_RULES = `
+rule Adware_Generic_Bundle {
+  strings:
+    $adware1 = "adware" nocase
+    $adware2 = "adware.dll" nocase
+    $pup1 = "potentially unwanted" nocase
+    $pup2 = "PUP" nocase
+  condition:
+    any of ($adware1, $adware2, $pup1, $pup2)
+}
+
+rule Adware_Browser_Hijacker {
+  strings:
+    $hijack1 = "browser hijack" nocase
+    $hijack2 = "homepage" nocase
+    $toolbar = "toolbar" nocase
+  condition:
+    2 of them
+}
+
+rule Adware_Tracker {
+  strings:
+    $track1 = "tracker" nocase
+    $track2 = "analytics" nocase
+    $adsdk = "adsdk" nocase
+  condition:
+    2 of them
+}
+`;
+function buildYaraCommand(path, rulesPath, adwareOnly) {
+  const p = requireValue(path, "path");
+  if (adwareOnly && !rulesPath) {
+    return `printf '%s' '${BUNDLED_ADWARE_RULES.replace(/'/g, "'\\''")}' > /tmp/termigo-adware.yar && yara /tmp/termigo-adware.yar ${p}`;
+  }
+  const r = rulesPath ? ` ${rulesPath}` : "";
+  return `yara ${r} ${p}`;
+}
 function buildAvCommand(path, engine) {
   const p = requireValue(path, "path");
   const engineName = String(engine || "auto").toLowerCase();
@@ -348,7 +385,7 @@ function buildAvCommand(path, engine) {
   if (engineName === "defender" || engineName === "mpcmdrun") {
     return `MpCmdRun.exe -Scan -ScanType 3 -File ${p}`;
   }
-  return `(clamscan --no-summary --recursive ${p}) || (MpCmdRun.exe -Scan -ScanType 3 -File ${p})`;
+  return `clamscan --no-summary --recursive ${p}`;
 }
 function parseClamav(text) {
   const findings = [];
@@ -357,14 +394,14 @@ function parseClamav(text) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     if (/FOUND/i.test(trimmed)) {
-      const parts = trimmed.split(/:|\\s+/);
-      const file = parts[0] || "unknown";
-      const malware = trimmed.match(/([A-Za-z0-9_.-]+)\\s+FOUND/i);
+      const file = trimmed.split(/:/)[0] || "unknown";
+      const malware = trimmed.match(/([A-Za-z0-9_.-]+)\s+FOUND/i);
       findings.push({
         severity: "high",
         file,
         malware: malware ? malware[1] : "unknown",
-        engine: "clamav"
+        engine: "clamav",
+        category: "malware"
       });
     }
   }
@@ -381,7 +418,30 @@ function parseDefender(text) {
         severity: "high",
         file: "scanned",
         malware: trimmed,
-        engine: "defender"
+        engine: "defender",
+        category: "malware"
+      });
+    }
+  }
+  return findings;
+}
+function parseYara(text) {
+  const findings = [];
+  const lines = String(text || "").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const m = trimmed.match(/^([A-Za-z0-9_]+)\s+(.+)$/);
+    if (m) {
+      const ruleName = m[1];
+      const file = m[2];
+      const isAdwareRule = /adware|pup|tracker|browser|toolbar|hijack/i.test(ruleName);
+      findings.push({
+        severity: isAdwareRule ? "medium" : "high",
+        file,
+        malware: ruleName,
+        engine: "yara",
+        category: isAdwareRule ? "adware" : "malware"
       });
     }
   }
@@ -391,7 +451,9 @@ function makeAvScanHandler(ctx) {
   return async function av_scan(args) {
     const path = requireValue(args.path, "path");
     const engine = args.engine || "auto";
-    const command = buildAvCommand(path, engine);
+    const adwareOnly = !!args.adwareOnly;
+    const yaraRules = args.yaraRules || "";
+    const command = adwareOnly ? buildYaraCommand(path, yaraRules, adwareOnly) : buildAvCommand(path, engine);
     const output = await runShell(
       ctx,
       command,
@@ -406,33 +468,35 @@ function makeAvScanHandler(ctx) {
         target: path,
         command,
         status: "failed",
-        error: `no AV engine found (install clamav or ensure Windows Defender is available)`,
+        error: `no AV engine found (install clamav for cross-platform support, yara for adware rules, or Windows Defender on Windows)`,
         output: text.slice(0, MAX_EVIDENCE3),
         findings: [
           {
             tool: "av_scan",
             target: path,
             severity: "error",
-            summary: "av_scan: no supported AV engine installed on this host",
+            summary: "av_scan: no supported AV engine installed. Install clamav (brew/apt) or yara (brew/apt/go install).",
             evidence: text.slice(0, 4e3)
           }
         ]
       };
     }
     let parsed = [];
-    if (engine === "defender" || engine === "mpcmdrun") {
+    if (adwareOnly) {
+      parsed = parseYara(text);
+    } else if (engine === "defender" || engine === "mpcmdrun") {
       parsed = parseDefender(text);
     } else {
       parsed = parseClamav(text);
       if (parsed.length === 0) parsed = parseDefender(text);
     }
     const severity = timedOut ? "warn" : parsed.length > 0 ? "high" : "info";
-    const summary = timedOut ? `AV scan of ${path} timed out` : parsed.length > 0 ? `${parsed.length} malware/adware detection(s) in ${path}` : `no malware/adware detected in ${path}`;
+    const summary = timedOut ? `AV scan of ${path} timed out` : parsed.length > 0 ? `${parsed.length} detection(s) in ${path}${adwareOnly ? " (adware-only)" : ""}` : `no malware/adware detected in ${path}${adwareOnly ? " (adware-only)" : ""}`;
     void saveReport(ctx, { tool: "av_scan", target: path, command, output, severity });
     return {
       tool: "av_scan",
       target: path,
-      engine,
+      engine: adwareOnly ? "yara" : engine,
       command,
       status: timedOut ? "timed_out" : "completed",
       count: parsed.length,
@@ -444,7 +508,7 @@ function makeAvScanHandler(ctx) {
           target: path,
           severity,
           summary,
-          evidence: parsed.length ? parsed.map((f) => `[${f.engine}] ${f.malware} in ${f.file}`).join("\n") : "No malware/adware detected."
+          evidence: parsed.length ? parsed.map((f) => `[${f.engine}/${f.category}] ${f.malware} in ${f.file}`).join("\n") : "No malware/adware detected."
         }
       ]
     };
